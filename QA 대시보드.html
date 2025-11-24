@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QA 체크리스트 대시보드</title>
+    <style>
+        body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; padding: 20px; background-color: #f4f6f8; }
+        h2 { color: #333; border-left: 5px solid #4a90e2; padding-left: 10px; }
+        .controls { margin: 12px 0 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        select, input[type="text"] { padding: 8px 10px; border: 1px solid #ced4da; border-radius: 6px; background: #fff; }
+        button { padding: 8px 12px; border: 1px solid #adb5bd; background: #fff; border-radius: 6px; cursor: pointer; }
+        button:hover { background: #f1f3f5; }
+        table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: middle; }
+        th { background-color: #f8f9fa; font-weight: bold; color: #555; }
+        tr:hover { background-color: #f1f3f5; }
+        .desc { font-size: 0.9em; color: #666; }
+        .category { font-weight: 600; color: #0b7285; }
+        .muted { color: #868e96; font-size: 0.85em; }
+        .right { text-align: right; }
+
+        /* 상태 뱃지 */
+        .badge { cursor: pointer; padding: 6px 12px; border-radius: 20px; font-size: 0.85em; font-weight: bold; display: inline-block; text-align: center; min-width: 92px; transition: all 0.2s; user-select: none; }
+        .dev-todo { background-color: #e9ecef; color: #495057; }
+        .dev-done { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .tc-pending { background-color: #fff3cd; color: #856404; }
+        .tc-pass { background-color: #cce5ff; color: #004085; }
+        .tc-fail { background-color: #f8d7da; color: #721c24; }
+
+        .footer { margin-top: 14px; color: #868e96; font-size: 0.85em; }
+        .count { font-weight: 600; color: #495057; }
+        .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #f1f3f5; margin-left: 6px; font-size: 0.8em; color: #495057; }
+    </style>
+</head>
+<body>
+
+    <h2>✅ QA 체크리스트 대시보드</h2>
+    <div class="controls">
+        <label>
+            카테고리
+            <select id="categoryFilter">
+                <option value="ALL">전체</option>
+            </select>
+        </label>
+        <label>
+            검색
+            <input id="searchInput" type="text" placeholder="기능명/시나리오 검색">
+        </label>
+        <label>
+            작성자
+            <input id="updatedByInput" type="text" placeholder="이름/이니셜" style="width: 160px;">
+        </label>
+        <button id="resetBtn">필터 초기화</button>
+        <span id="syncStatus" class="muted">동기화: 대기</span>
+        <span class="muted">행 클릭으로 상태를 변경할 수 있습니다.</span>
+    </div>
+
+    <table id="tcTable">
+        <thead>
+            <tr>
+                <th style="width: 6%;">ID</th>
+                <th style="width: 14%;">카테고리</th>
+                <th style="width: 25%;">기능명</th>
+                <th style="width: 35%;">테스트 시나리오 (상세)</th>
+                <th style="width: 10%;">개발 상태</th>
+                <th style="width: 10%;">TC 결과</th>
+            </tr>
+        </thead>
+        <tbody id="tcBody"></tbody>
+    </table>
+    <div class="footer">
+        총 <span id="totalCount" class="count">0</span>건
+        <span class="pill" id="doneCount">개발 완료 0</span>
+        <span class="pill" id="passCount">TC Pass 0</span>
+        <span class="pill" id="failCount">TC Fail 0</span>
+    </div>
+
+    <script>
+        // ============ 원격 저장소 (Google Apps Script Web App) ============
+        // 배포한 Apps Script Web App URL로 교체하세요
+        const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbz0Y0va1VOIP1Zi8F3p7A0vbIwVzRWw92Gb9HRqxXND3Pusx1wm_WF6W7flRkla-fQI/exec";
+
+        function setSyncStatus(text, color = "#868e96") {
+            const el = document.getElementById("syncStatus");
+            el.textContent = "동기화: " + text;
+            el.style.color = color;
+        }
+
+        async function loadRemoteStatuses() {
+            if (!GAS_WEBAPP_URL || GAS_WEBAPP_URL.startsWith("REPLACE_")) return null;
+            try {
+                setSyncStatus("불러오는 중…");
+                const url = GAS_WEBAPP_URL + "?action=get&project=qa-dashboard";
+                const res = await fetch(url, { method: "GET" });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const data = await res.json();
+                setSyncStatus("불러오기 완료", "#2f9e44");
+                return data && data.statuses ? data.statuses : data;
+            } catch (e) {
+                setSyncStatus("불러오기 실패", "#e03131");
+                return null;
+            }
+        }
+
+        // Apps Script의 doPost에서 application/x-www-form-urlencoded로 받도록 구성하여
+        // 사전검사(OPTIONS) 없이 CORS 이슈를 완화합니다.
+        async function saveRemoteStatus(id, state, updatedBy) {
+            if (!GAS_WEBAPP_URL || GAS_WEBAPP_URL.startsWith("REPLACE_")) return;
+            try {
+                setSyncStatus("저장 중…");
+                const payload = {
+                    action: "upsert",
+                    project: "qa-dashboard",
+                    id,
+                    dev: state.dev,
+                    tc: state.tc,
+                    updatedBy: updatedBy || ""
+                };
+                const body = "payload=" + encodeURIComponent(JSON.stringify(payload));
+                const res = await fetch(GAS_WEBAPP_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                setSyncStatus("저장됨", "#2f9e44");
+            } catch (e) {
+                setSyncStatus("저장 실패", "#e03131");
+                // 원격 실패 시에도 로컬 스토리지는 유지됩니다.
+            }
+        }
+
+        // ============ 체크리스트 데이터 (QA 체크리스트 - Happy Path.md 기반) ============
+        const items = [
+            // 1) LEBS API — Happy Path
+            { c: "LEBS API — Happy Path", n: "Partner Account 생성", d: "파트너 고객사를 생성할 수 있다." },
+            { c: "LEBS API — Happy Path", n: "파트너 회원 생성", d: "아이디/이메일/이름으로 생성, 기본 비밀번호 부여, 특정 Partner Account에 할당한다." },
+            { c: "LEBS API — Happy Path", n: "Partner Contract 생성", d: "고객사의 계약을 생성한다." },
+            { c: "LEBS API — Happy Path", n: "Partner License 생성", d: "고객사 계약에 딸린 라이선스를 생성한다." },
+            { c: "LEBS API — Happy Path", n: "Partner Subscription 생성", d: "라이선스와 연결된 구독 정보를 생성한다." },
+            { c: "LEBS API — Happy Path", n: "API Key 생성/할당", d: "50자 알파뉴메릭 생성, 지정 Partner Account에 할당, 데이터셋 지정할 수 있다." },
+            { c: "LEBS API — Happy Path", n: "관계 일관성(선택)", d: "회원 1 : Account 1 : API Key N 관계가 조회 시 일관성 유지" },
+
+            // 2) 다음 단계로 넘어가기 전에 필수 확인 — Happy Path
+            { c: "필수 확인 — Happy Path", n: "관리자 회원 존재", d: "파트너 계정/관리자 회원이 생성되어 있다" },
+            { c: "필수 확인 — Happy Path", n: "API Key 발급", d: "최소 1개의 API Key(50자 영문/숫자)가 발급되어 있다" },
+            { c: "필수 확인 — Happy Path", n: "데이터셋 권한", d: "API Key에 '법령' 데이터셋 권한이 할당되어 있다" },
+            { c: "필수 확인 — Happy Path", n: "인증/인가 정책", d: "인증/인가 기본 정책(Keycloak 기본 정책)이 적용되어 있다" },
+
+            // 3) 파트너 포털 UI — Happy Path
+            { c: "파트너 포털 UI — Happy Path", n: "최초 로그인 플로우", d: "“최초 로그인 → 비밀번호 재설정 → (재)로그인 → 사용량 첫 화면” 순서로 작동" },
+            { c: "파트너 포털 UI — Happy Path", n: "로그인 성공", d: "로그인 화면을 통과해 첫 화면으로 랜딩 (사용량)" },
+            { c: "파트너 포털 UI — Happy Path", n: "비밀번호 재설정", d: "이메일 입력→재설정 링크 수신→링크 통해 새 비밀번호 설정 완료" },
+            { c: "파트너 포털 UI — Happy Path", n: "세션 유지", d: "정상 사용 중 정책 기준 시간 내 세션 유지 동작" },
+            { c: "파트너 포털 UI — Happy Path", n: "프로필 관리", d: "이름/이메일/비밀번호 변경 저장 성공(현재 비밀번호 인증 포함)" },
+            { c: "파트너 포털 UI — Happy Path", n: "API Key 조회", d: "Key 전문(50자 알파뉴메릭)·생성일·이름·설명·접근 데이터셋 표시, Key 전문 전체 확인 가능" },
+            { c: "파트너 포털 UI — Happy Path", n: "사용량 조회", d: "일자별 집계 표 정상 표시" },
+            { c: "파트너 포털 UI — Happy Path", n: "로그아웃", d: "로그아웃 후 로그인 화면 이동, 인증 세션 종료" },
+            { c: "파트너 포털 UI — Happy Path", n: "API 연동 문서", d: "문서 접근/다운로드 가능(선택)" },
+
+            // 3) 파트너 API — Happy Path
+            { c: "파트너 API — Happy Path", n: "AI 질의 요청/응답", d: "유효 API Key(+허용된 IP/토큰) 요청 시 200, 응답 본문에 AI 답변 포함" },
+            { c: "파트너 API — Happy Path", n: "데이터셋 검증", d: "'법령'만 사용 가능한 API Key로 질의 시, 응답에 법령만 포함" },
+            { c: "파트너 API — Happy Path", n: "Metering 기록", d: "질의 1건당 사용량 1건으로 집계(파트너 포털 일일 집계 반영)" },
+            { c: "파트너 API — Happy Path", n: "참조 문서 제공", d: "엘박스 PDP URL 최대 10건, 문서 hashed key 최대 10건 포함(정책 포함 시)" },
+            { c: "파트너 API — Happy Path", n: "PDP URL 응답", d: "참조 문서 PDP URL 접근 200 응답(권한/리다이렉트 문제 없음)" },
+            { c: "파트너 API — Happy Path", n: "문서 조회(우선순위 낮음)", d: "해시 키로 조회 시 유효 시간 내(예: 10분) 200, 본문 제공" },
+
+            // 4) 비기능/보안 — Happy Path
+            { c: "비기능/보안 — Happy Path", n: "인증/인가 흐름", d: "보호 리소스 접근 시 로그인 필요, 권한 내 메뉴만 접근" },
+            { c: "비기능/보안 — Happy Path", n: "데이터셋 접근 통제", d: "지정된 데이터셋만 응답/참조 문서로 제공" },
+            { c: "비기능/보안 — Happy Path", n: "감사/로그", d: "로그인, Key 발급, API 호출 등 주요 이벤트 로그 남김" },
+
+            // Error — 공통/환경
+            { c: "공통/환경 — Error", n: "필수 파라미터 누락", d: "400" },
+            { c: "공통/환경 — Error", n: "포맷 오류", d: "이메일/길이/알파뉴메릭 불일치 등 → 422" },
+            { c: "공통/환경 — Error", n: "권한 없음", d: "토큰/역할/데이터셋 미일치 → 403" },
+            { c: "공통/환경 — Error", n: "인증 실패", d: "만료/유효하지 않은 토큰/Key → 401" },
+            { c: "공통/환경 — Error", n: "리소스 없음", d: "존재하지 않는 ID/Key → 404" },
+            { c: "공통/환경 — Error", n: "중복 생성", d: "이메일/키/식별자 충돌 → 409" },
+            { c: "공통/환경 — Error", n: "쿼터 초과", d: "429" },
+            { c: "공통/환경 — Error", n: "서버 오류/타임아웃", d: "5xx/504" },
+
+            // Error — LEBS API
+            { c: "LEBS API — Error", n: "Account 생성", d: "필수값 누락/포맷 오류 → 400/422" },
+            { c: "LEBS API — Error", n: "회원 생성", d: "이메일 형식 오류/중복 이메일 → 422/409" },
+            { c: "LEBS API — Error", n: "회원 할당", d: "존재하지 않는 Partner Account 할당 → 404" },
+            { c: "LEBS API — Error", n: "계약/라이선스/구독", d: "선행 엔티티 미존재(순서 위반) → 409/404" },
+            { c: "LEBS API — Error", n: "Key 생성(형식)", d: "50자 알파뉴메릭 불일치/길이 초과 → 422" },
+            { c: "LEBS API — Error", n: "Key 생성(데이터셋)", d: "미지원 데이터셋 지정 → 422" },
+            { c: "LEBS API — Error", n: "Key 할당", d: "비활성/폐기 Account에 할당 시도 → 409/403" },
+            { c: "LEBS API — Error", n: "멱등성", d: "멱등성 미보장으로 중복 생성 → 409" },
+            { c: "LEBS API — Error", n: "일관성 지연", d: "생성 성공 후 즉시 조회 불일치 → 재시도/관찰" },
+
+            // Error — 필수 확인
+            { c: "필수 확인 — Error", n: "관리자 회원 없음", d: "포털 접근 → 401" },
+            { c: "필수 확인 — Error", n: "Key 상태 이상", d: "미발급/만료/폐기/비활성 → 401/403" },
+            { c: "필수 확인 — Error", n: "데이터셋 권한 없음", d: "‘법령’ 권한 미부여 Key로 법령 데이터 접근 → 403" },
+
+            // Error — 포털 UI
+            { c: "파트너 포털 UI — Error", n: "로그인 실패", d: "잘못된 이메일/비밀번호 → 오류 메시지" },
+            { c: "파트너 포털 UI — Error", n: "계정 잠김/비활성", d: "로그인 차단, 안내 메시지" },
+            { c: "파트너 포털 UI — Error", n: "최초 비번 재설정", d: "복잡도 미충족/이전 비밀번호 재사용 → 422" },
+            { c: "파트너 포털 UI — Error", n: "재설정 링크 만료", d: "400/410" },
+            { c: "파트너 포털 UI — Error", n: "재설정 링크 위조", d: "400/410" },
+            { c: "파트너 포털 UI — Error", n: "프로필 변경 인증", d: "현재 비밀번호 불일치 → 401" },
+            { c: "파트너 포털 UI — Error", n: "프로필 변경 형식", d: "이메일 형식 오류/중복 이메일 → 422/409" },
+            { c: "파트너 포털 UI — Error", n: "세션 타임아웃", d: "이후 액션 시 재로그인 요구" },
+            { c: "파트너 포털 UI — Error", n: "API Key 목록 권한", d: "권한 밖 Key 노출/비노출 검증 → 접근제어 확인" },
+            { c: "파트너 포털 UI — Error", n: "사용량 표 로딩 실패", d: "에러 상태 UI/재시도" },
+            { c: "파트너 포털 UI — Error", n: "문서/가이드 다운로드 실패", d: "403/404" },
+
+            // Error — 파트너 API
+            { c: "파트너 API — Error", n: "인증 실패", d: "API Key 불일치 → 401, code AUTH_INVALID_KEY, \"Invalid API key\"" },
+            { c: "파트너 API — Error", n: "인가 실패", d: "허용 IP 대역 아님 → 403, code IP_NOT_ALLOWED" },
+            { c: "파트너 API — Error", n: "본문 오류/누락", d: "400/422, code INVALID_REQUEST_BODY, details 포함" },
+            { c: "파트너 API — Error", n: "입력 초과", d: "프롬프트 길이 제한 초과 → 413, code INPUT_TOO_LONG" },
+            { c: "파트너 API — Error", n: "데이터셋 불일치", d: "‘법령’ 미허용 Key로 질의 → 403" },
+            { c: "파트너 API — Error", n: "쿼터 초과", d: "429, code RATE_LIMIT_EXCEEDED (resetAt 포함)" },
+            { c: "파트너 API — Error", n: "참조 문서 0건", d: "200, 빈 목록 허용(정책 확정 시 204 대안)" },
+            { c: "파트너 API — Error", n: "PDP URL 접근 실패", d: "403/리다이렉트 루프 → 링크 유효성/권한 검증" },
+            { c: "파트너 API — Error", n: "문서 조회 키 만료/위조", d: "401/403" },
+            { c: "파트너 API — Error", n: "문서 조회 유효 시간 초과", d: ">10분 → 410/403" },
+            { c: "파트너 API — Error", n: "서버 타임아웃/AI 지연", d: "504/재시도 지침" },
+
+            // Error — 데이터 일관성/집계
+            { c: "데이터 일관성/집계 — Error", n: "성공 집계", d: "성공 응답이면 사용량이 집계되어야 한다" },
+            { c: "데이터 일관성/집계 — Error", n: "실패 미집계", d: "실패 응답이면 사용량이 집계되지 않아야 한다" },
+            { c: "데이터 일관성/집계 — Error", n: "시간대 기준", d: "모든 집계 시간은 KST 기준이며 날짜 경계(자정) 검증" },
+
+            // Error — 보안/컴플라이언스
+            { c: "보안/컴플라이언스 — Error", n: "민감정보 로그 노출", d: "비밀번호/Key 마스킹 확인" },
+            { c: "보안/컴플라이언스 — Error", n: "CORS/CSRF", d: "설정 오류 → 정책 확인" },
+            { c: "보안/컴플라이언스 — Error", n: "브루트포스 방어", d: "계정 락/지연/캡차 정책 확인" },
+            { c: "보안/컴플라이언스 — Error", n: "URL 파라미터 조작", d: "타 Account 접근 → 수직/수평 권한 체크" },
+            { c: "보안/컴플라이언스 — Error", n: "레이트리밋 우회", d: "다중 IP/Key 순환 → 글로벌/엔티티별 정책 확인" }
+        ];
+
+        // ============ 상태 보존 (로컬) ============
+        // 원격 저장소 연동 전/실패 시에도 동작하도록 로컬 스토리지를 사용합니다.
+        const STORAGE_KEY = "qa-dashboard-status";
+
+        function getSavedStatuses() {
+            try {
+                return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+            } catch { return {}; }
+        }
+        function saveStatuses(status) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(status));
+        }
+
+        function render() {
+            const tbody = document.getElementById("tcBody");
+            const categoryFilter = document.getElementById("categoryFilter").value;
+            const searchQuery = document.getElementById("searchInput").value.trim().toLowerCase();
+            const saved = getSavedStatuses();
+
+            tbody.innerHTML = "";
+            let idCounter = 1;
+            let done = 0, pass = 0, fail = 0, total = 0;
+
+            items.forEach((it, idx) => {
+                const id = idx + 1;
+                const matchesCategory = categoryFilter === "ALL" || it.c === categoryFilter;
+                const matchesSearch = !searchQuery || (it.n + " " + it.d + " " + it.c).toLowerCase().includes(searchQuery);
+                if (!matchesCategory || !matchesSearch) return;
+
+                total++;
+                const key = "i" + id;
+                const devState = saved[key]?.dev || "todo"; // todo | done
+                const tcState = saved[key]?.tc || "pending"; // pending | pass | fail
+
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${idCounter}</td>
+                    <td class="category">${it.c}</td>
+                    <td>${it.n}</td>
+                    <td><span class="desc">${it.d || ""}</span></td>
+                    <td class="right">
+                        <span class="badge ${devState === "done" ? "dev-done" : "dev-todo"}" data-id="${key}" data-type="dev">${devState === "done" ? "개발 완료 ✅" : "개발 대기"}</span>
+                    </td>
+                    <td class="right">
+                        <span class="badge ${tcState === "pass" ? "tc-pass" : (tcState === "fail" ? "tc-fail" : "tc-pending")}" data-id="${key}" data-type="tc">${tcState === "pass" ? "Pass 🔵" : (tcState === "fail" ? "Fail 🔴" : "미테스트")}</span>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+
+                if (devState === "done") done++;
+                if (tcState === "pass") pass++;
+                if (tcState === "fail") fail++;
+                idCounter++;
+            });
+
+            document.getElementById("totalCount").innerText = total;
+            document.getElementById("doneCount").innerText = "개발 완료 " + done;
+            document.getElementById("passCount").innerText = "TC Pass " + pass;
+            document.getElementById("failCount").innerText = "TC Fail " + fail;
+        }
+
+        function initFilters() {
+            const select = document.getElementById("categoryFilter");
+            const categories = Array.from(new Set(items.map(i => i.c)));
+            categories.forEach(c => {
+                const opt = document.createElement("option");
+                opt.value = c;
+                opt.textContent = c;
+                select.appendChild(opt);
+            });
+            select.addEventListener("change", render);
+            document.getElementById("searchInput").addEventListener("input", render);
+            document.getElementById("resetBtn").addEventListener("click", () => {
+                select.value = "ALL";
+                document.getElementById("searchInput").value = "";
+                render();
+            });
+            // 작성자 입력값 저장/복원
+            const updatedByInput = document.getElementById("updatedByInput");
+            updatedByInput.value = localStorage.getItem("qa-dashboard-updatedBy") || "";
+            updatedByInput.addEventListener("input", () => {
+                localStorage.setItem("qa-dashboard-updatedBy", updatedByInput.value.trim());
+            });
+        }
+
+        function initInteractions() {
+            document.getElementById("tcBody").addEventListener("click", (e) => {
+                const target = e.target;
+                if (!target.classList.contains("badge")) return;
+                const id = target.getAttribute("data-id");
+                const type = target.getAttribute("data-type");
+                const saved = getSavedStatuses();
+                const state = saved[id] || {};
+
+                if (type === "dev") {
+                    // toggle dev state
+                    if (target.classList.contains("dev-todo")) {
+                        target.classList.remove("dev-todo");
+                        target.classList.add("dev-done");
+                        target.innerText = "개발 완료 ✅";
+                        state.dev = "done";
+                    } else {
+                        target.classList.remove("dev-done");
+                        target.classList.add("dev-todo");
+                        target.innerText = "개발 대기";
+                        state.dev = "todo";
+                    }
+                } else if (type === "tc") {
+                    // cycle tc state: pending -> pass -> fail -> pending
+                    if (target.classList.contains("tc-pending")) {
+                        target.classList.remove("tc-pending");
+                        target.classList.add("tc-pass");
+                        target.innerText = "Pass 🔵";
+                        state.tc = "pass";
+                    } else if (target.classList.contains("tc-pass")) {
+                        target.classList.remove("tc-pass");
+                        target.classList.add("tc-fail");
+                        target.innerText = "Fail 🔴";
+                        state.tc = "fail";
+                    } else {
+                        target.classList.remove("tc-fail");
+                        target.classList.add("tc-pending");
+                        target.innerText = "미테스트";
+                        state.tc = "pending";
+                    }
+                }
+                const savedAll = getSavedStatuses();
+                savedAll[id] = state;
+                saveStatuses(savedAll);
+                // 원격 저장 시도
+                const updatedBy = (document.getElementById("updatedByInput").value || "").trim();
+                saveRemoteStatus(id, state, updatedBy);
+                // 요약 수치 업데이트
+                render();
+            });
+        }
+
+        // 초기화 (원격 상태 불러오기 후 렌더)
+        async function init() {
+            initFilters();
+            const remote = await loadRemoteStatuses();
+            if (remote && typeof remote === "object") {
+                const local = getSavedStatuses();
+                // 원격 값을 우선 적용(로컬과 병합)
+                const merged = { ...local, ...remote };
+                saveStatuses(merged);
+            }
+            render();
+            initInteractions();
+        }
+        init();
+    </script>
+</body>
+</html>
+
